@@ -1,3 +1,4 @@
 ClaudeAccounts.exe
 .claude/
 accounts/
+_*.ps1
