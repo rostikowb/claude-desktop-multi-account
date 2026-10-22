@@ -95,6 +95,7 @@ Local changes on top of upstream, so two accounts do not share identity files:
 ## How it works
 
 - Each account window is the Claude app started with Chromium's `--user-data-dir` switch, pointing at `~\.claude-accounts\<name>`.
+- The tray (`ClaudeAccounts.exe tray`) is a WinForms-only process (~25 MB, no WPF). The usage window is a separate process (`ClaudeAccounts.exe usage`) that exits when its window is closed, so its WPF memory is returned instead of being kept alive inside the tray.
 - Windows groups taskbar buttons by app id. While `ClaudeAccounts.exe` runs, it gives each account window, and its shortcut, its own id. That way each account gets a separate, pinnable button.
 - Usage comes from the `plan-usage-history.json` file the app writes in each data folder. A window counts as open while the app holds that folder's `lockfile`.
 - A limit only falls when its window resets, so the oldest saved number in an unbroken run marks a moment the current window already existed; it ends at most five hours (or seven days) later. Exact reset times come from the `cachedUsageUtilization` entry Claude Code keeps in `~\.claude.json`, when it belongs to that account.

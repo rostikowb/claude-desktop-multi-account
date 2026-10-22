@@ -622,7 +622,6 @@ namespace ClaudeAccounts
 
         public readonly Window Window;
         readonly ItemsControl list;
-        bool quitting;
 
         public UsageWindow()
         {
@@ -633,13 +632,6 @@ namespace ClaudeAccounts
             Window.SourceInitialized += delegate { Taskbar.MatchTitleBar(Window, ((SolidColorBrush)Window.Background).Color); };
             Window.SizeChanged += delegate { Dock(); };
             Window.Activated += delegate { Refresh(); };
-            // Closing the window keeps the tray icon; Quit is in the tray menu.
-            Window.Closing += delegate(object sender, System.ComponentModel.CancelEventArgs e)
-            {
-                if (quitting) return;
-                e.Cancel = true;
-                Window.Hide();
-            };
             list.MouseLeftButtonUp += delegate(object sender, MouseButtonEventArgs e)
             {
                 var element = e.OriginalSource as FrameworkElement;
@@ -685,71 +677,123 @@ namespace ClaudeAccounts
 
         public void Quit()
         {
-            quitting = true;
             Window.Close();
         }
     }
 
     static class Program
     {
-        // `ClaudeAccounts.exe`              show the window (starts the tray icon if needed)
-        // `ClaudeAccounts.exe tray`         start in the tray without showing the window
+        // `ClaudeAccounts.exe`              show the usage window (its own process, exits on close)
+        // `ClaudeAccounts.exe usage`        the same, explicitly
+        // `ClaudeAccounts.exe tray`         start the tray only, without loading WPF
         // `ClaudeAccounts.exe open <name>`  open that account's Claude window
         [STAThread]
         static void Main(string[] args)
         {
-            var command = args.Length > 0 ? args[0] : "";
+            var command = args.Length > 0 ? args[0] : "usage";
             if (command == "open" && args.Length > 1)
             {
                 Accounts.Open(args[1]);
                 // The tray instance tags the new window so it gets its own taskbar button.
-                Process.Start(new ProcessStartInfo(Paths.Exe, "tray") { UseShellExecute = false });
+                StartTray();
                 return;
             }
+            if (command == "tray") { RunTray(); return; }
+            RunUsage();
+        }
 
+        static void StartTray()
+        {
+            Process.Start(new ProcessStartInfo(Paths.Exe, "tray") { UseShellExecute = false });
+        }
+
+        // WinForms only: the tray costs ~20 MB and never loads WPF.
+        static void RunTray()
+        {
             bool first;
             using (var mutex = new Mutex(true, "ClaudeAccounts.Tray", out first))
-            using (var showRequest = new EventWaitHandle(false, EventResetMode.AutoReset, "ClaudeAccounts.Show"))
             {
-                if (!first)
+                if (!first) return;
+                Forms.Application.EnableVisualStyles();
+                Forms.Application.SetCompatibleTextRenderingDefault(false);
+
+                var tray = new Forms.NotifyIcon { Icon = Paths.Icon(), Text = "Claude accounts", Visible = true };
+                var menu = new Forms.ContextMenuStrip();
+                menu.Items.Add("Show usage", null, delegate { ShowUsage(); });
+                menu.Items.Add("Quit", null, delegate
                 {
-                    if (command != "tray") showRequest.Set();
-                    return;
-                }
-                Run(command != "tray", showRequest);
+                    tray.Visible = false;
+                    CloseUsage();
+                    Forms.Application.Exit();
+                });
+                tray.ContextMenuStrip = menu;
+                tray.MouseClick += delegate(object sender, Forms.MouseEventArgs e)
+                {
+                    if (e.Button == Forms.MouseButtons.Left) ShowUsage();
+                };
+
+                var tagger = new System.Threading.Timer(delegate { Taskbar.TagAccountWindows(); }, null, 0, 2000);
+                try { Forms.Application.Run(); }
+                finally { tagger.Dispose(); tray.Dispose(); }
             }
         }
 
-        static void Run(bool showWindow, EventWaitHandle showRequest)
+        static void ShowUsage()
         {
-            Taskbar.SetCurrentProcessExplicitAppUserModelID("ClaudeAccounts.Usage");
-            var app = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
-            var usage = new UsageWindow();
+            Process.Start(new ProcessStartInfo(Paths.Exe, "usage") { UseShellExecute = false });
+        }
 
-            var tray = new Forms.NotifyIcon { Icon = Paths.Icon(), Text = "Claude accounts", Visible = true };
-            var menu = new Forms.ContextMenuStrip();
-            menu.Items.Add("Show usage", null, delegate { usage.Show(); });
-            menu.Items.Add("Quit", null, delegate { tray.Visible = false; usage.Quit(); app.Shutdown(); });
-            tray.ContextMenuStrip = menu;
-            tray.MouseClick += delegate(object sender, Forms.MouseEventArgs e)
+        static void CloseUsage()
+        {
+            try
             {
-                if (e.Button != Forms.MouseButtons.Left) return;
-                if (usage.Window.IsVisible && usage.Window.IsActive) usage.Window.Hide(); else usage.Show();
-            };
+                using (var quit = EventWaitHandle.OpenExisting("ClaudeAccounts.UsageQuit")) quit.Set();
+            }
+            catch { }
+        }
 
-            // A second start of this program asks the running one to show its window.
-            var listener = new Thread(delegate()
+        // WPF lives only in this process and dies with its window, so the memory is returned.
+        static void RunUsage()
+        {
+            bool first;
+            using (var mutex = new Mutex(true, "ClaudeAccounts.Usage", out first))
             {
-                while (showRequest.WaitOne()) app.Dispatcher.BeginInvoke(new Action(usage.Show));
-            }) { IsBackground = true };
-            listener.Start();
+                if (!first)
+                {
+                    try { using (var show = EventWaitHandle.OpenExisting("ClaudeAccounts.UsageShow")) show.Set(); }
+                    catch { }
+                    return;
+                }
 
-            var tagger = new System.Threading.Timer(delegate { Taskbar.TagAccountWindows(); }, null, 0, 2000);
+                using (var show = new EventWaitHandle(false, EventResetMode.AutoReset, "ClaudeAccounts.UsageShow"))
+                using (var quit = new EventWaitHandle(false, EventResetMode.AutoReset, "ClaudeAccounts.UsageQuit"))
+                {
+                    Taskbar.SetCurrentProcessExplicitAppUserModelID("ClaudeAccounts.Usage");
+                    var app = new Application { ShutdownMode = ShutdownMode.OnMainWindowClose };
+                    var usage = new UsageWindow();
+                    app.MainWindow = usage.Window;
+                    usage.Show();
 
-            if (showWindow) usage.Show();
-            app.Run();
-            tagger.Dispose();
-            tray.Dispose();
+                    // A second start asks this window to come forward; the tray's Quit asks it to exit.
+                    var listener = new Thread(delegate()
+                    {
+                        var handles = new WaitHandle[] { show, quit };
+                        while (true)
+                        {
+                            int index = WaitHandle.WaitAny(handles);
+                            if (index == 1)
+                            {
+                                app.Dispatcher.BeginInvoke(new Action(usage.Quit));
+                                return;
+                            }
+                            app.Dispatcher.BeginInvoke(new Action(usage.Show));
+                        }
+                    }) { IsBackground = true };
+                    listener.Start();
+
+                    app.Run();
+                }
+            }
         }
     }
 }
