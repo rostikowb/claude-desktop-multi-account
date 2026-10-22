@@ -69,6 +69,28 @@ Google sign-in does not work in the extra windows. It finishes in your browser a
 | `ccm shortcuts` | Recreate the shortcuts and icons, including pinned ones |
 | `ccm build` | Rebuild `ClaudeAccounts.exe` |
 | `ccm install` | Build, create shortcuts, and make `ccm` available in every terminal |
+| `ccm doctor` | Compare the install id, Claude Code machine id and device name of every window |
+| `ccm isolate <name>` | Give an existing account its own Claude Code config dir, temp dir and device name |
+| `ccm claude <name> [args]` | Run Claude Code in this terminal with that account's own config |
+| `ccm telemetry <name> off\|on` | Block or allow the app's essential telemetry (Sentry, Datadog RUM) for one window |
+
+## Isolation
+
+Local changes on top of upstream, so two accounts do not share identity files:
+
+- Every window is started with its own `CLAUDE_CONFIG_DIR` (`<data folder>\claude-config`),
+  `TEMP`/`TMP` (`<data folder>\temp`) and `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`.
+  Claude Code's `machineID`, `userID`, session history and Windows Credential Manager
+  entry therefore stay per account, instead of living in `~\.claude` and `~\.claude.json`.
+- `ccm add` writes a random `remoteToolsDeviceName` (`device-<hex>`) instead of letting
+  the app advertise the hostname.
+- `ccm telemetry <name> off` adds `--desktop-managed-config={"disableEssentialTelemetry":true}`
+  to that window, which stops the crash/report telemetry that carries CPU, RAM, screen
+  and machine manufacturer/model.
+- What remains shared and cannot be changed from the client: the public IP, the OS
+  hostname and hardware, the `anthropic-client-*` headers (RAM class, OS, app version),
+  and anything tied to payments or email addresses. See `ISOLATION.md` for measurements.
+
 
 ## How it works
 

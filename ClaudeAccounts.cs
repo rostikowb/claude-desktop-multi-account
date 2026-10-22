@@ -373,11 +373,44 @@ namespace ClaudeAccounts
             return rows;
         }
 
+        // Each account window also gets its own Claude Code config directory, its own temp
+        // directory and no non-essential traffic, so nothing under ~ keeps state shared
+        // between accounts: CLI identity, credentials, telemetry spool and temp files
+        // all land inside the account's folder instead.
         public static void Open(string name)
         {
             var start = new ProcessStartInfo(Paths.App) { UseShellExecute = true };
-            if (name != null) start.Arguments = "--user-data-dir=\"" + DataDir(name) + "\"";
-            Process.Start(start);
+            if (name == null)
+            {
+                Process.Start(start);
+                return;
+            }
+
+            var data = DataDir(name);
+            start.Arguments = "--user-data-dir=\"" + data + "\"";
+            var config = Path.Combine(data, "claude-config");
+            var temp = Path.Combine(data, "temp");
+            Directory.CreateDirectory(config);
+            Directory.CreateDirectory(temp);
+            if (File.Exists(Path.Combine(data, "no-telemetry")))
+                start.Arguments += " --desktop-managed-config={\"disableEssentialTelemetry\":true}";
+
+            // ShellExecute passes the launcher's environment block to the child, so the
+            // variables only have to live for the duration of the start call.
+            string[] names = { "CLAUDE_CONFIG_DIR", "TEMP", "TMP", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" };
+            string[] values = { config, temp, temp, "1" };
+            var saved = new string[names.Length];
+            for (int i = 0; i < names.Length; i++)
+            {
+                saved[i] = Environment.GetEnvironmentVariable(names[i]);
+                Environment.SetEnvironmentVariable(names[i], values[i]);
+            }
+            try { Process.Start(start); }
+            finally
+            {
+                for (int i = 0; i < names.Length; i++)
+                    Environment.SetEnvironmentVariable(names[i], saved[i]);
+            }
         }
     }
 

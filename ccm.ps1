@@ -17,7 +17,7 @@ $Shortcuts = Join-Path ([Environment]::GetFolderPath('Programs')) 'Claude accoun
 $App = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\claude-desktop.exe'
 $MainData = Join-Path $env:APPDATA 'Claude'
 $Exe = Join-Path $PSScriptRoot 'ClaudeAccounts.exe'
-$Reserved = 'add', 'list', 'ls', 'remove', 'rm', 'rename', 'shortcuts', 'usage', 'build', 'install', 'help'
+$Reserved = 'add', 'list', 'ls', 'remove', 'rm', 'rename', 'shortcuts', 'usage', 'build', 'install', 'doctor', 'isolate', 'claude', 'telemetry', 'help'
 $Colors = '#2563EB', '#16A34A', '#7C3AED', '#DB2777', '#0D9488', '#475569', '#B45309', '#DC2626'
 
 function Show-Help {
@@ -26,6 +26,11 @@ ccm - keep several Claude accounts open side by side in the desktop app
 
   ccm add <name>     create an account window and its Start menu shortcut
   ccm <name>         open that account's window (same as clicking "Claude <name>")
+  ccm claude <name>  run Claude Code in this terminal with that account's own config
+  ccm doctor         check that no two windows share an identity file
+  ccm isolate <name> give an account its own Claude Code config, temp dir and device name
+  ccm telemetry <name> off|on
+                     block the app's essential telemetry (Sentry, Datadog RUM) for one window
   ccm usage          open the usage window (also lives in the tray)
   ccm list           the same numbers as text
   ccm rename <a> <b> give an account a different name (its window must be closed)
@@ -232,11 +237,32 @@ function Update-Shortcuts {
     "Shortcuts are in the Start menu under 'Claude accounts'."
 }
 
+# State that used to be shared through %USERPROFILE% and %TEMP%: a Claude Code config
+# directory (machine id, credentials, telemetry spool) and a temp directory. The
+# launcher points CLAUDE_CONFIG_DIR/TEMP/TMP there, so nothing carries over between
+# accounts. The device name the app shows for remote tools stops being the hostname.
+function Initialize-Isolation($name, $data) {
+    New-Item -ItemType Directory -Force (Join-Path $data 'claude-config'), (Join-Path $data 'temp') | Out-Null
+    $file = Join-Path $data 'claude_desktop_config.json'
+    $config = if (Test-Path -LiteralPath $file) {
+        try { Get-Content -LiteralPath $file -Raw | ConvertFrom-Json } catch { [pscustomobject]@{} }
+    } else { [pscustomobject]@{} }
+    if (-not $config.PSObject.Properties['preferences']) {
+        $config | Add-Member -NotePropertyName preferences -NotePropertyValue ([pscustomobject]@{})
+    }
+    if (-not $config.preferences.remoteToolsDeviceName -or $config.preferences.remoteToolsDeviceName -eq [Environment]::MachineName) {
+        $config.preferences | Add-Member -NotePropertyName remoteToolsDeviceName `
+            -NotePropertyValue ('device-' + [guid]::NewGuid().ToString('N').Substring(0, 10)) -Force
+    }
+    [IO.File]::WriteAllText($file, ($config | ConvertTo-Json -Depth 20), (New-Object Text.UTF8Encoding($false)))
+}
+
 function New-Account($name) {
     $data = Get-AccountDir $name
     if (Test-Path -LiteralPath $data) { throw "Account '$name' already exists." }
     if (-not (Test-Path -LiteralPath $App)) { throw 'The Claude desktop app is not installed (claude-desktop.exe not found).' }
     New-Item -ItemType Directory -Force $data | Out-Null
+    Initialize-Isolation $name $data
     Set-AccountShortcut $name $data
     Set-UsageShortcut
     "Created '$name'. Open it from the Start menu (`"Claude $name`") or with: ccm $name"
@@ -246,6 +272,96 @@ function Open-Account($name) {
     Get-ExistingAccountDir $name | Out-Null
     Start-Process (Get-Exe) -ArgumentList 'open', $name
     "Opening Claude for '$name'."
+}
+
+# Run the Claude Code CLI against this account's own config directory, so a terminal
+# session cannot reuse another account's machine id or saved credentials.
+# The app reads --desktop-managed-config from its own command line; the launcher turns
+# that into this marker so blocking telemetry is one file per account.
+function Set-Telemetry($name, $state) {
+    $data = Get-ExistingAccountDir $name
+    $marker = Join-Path $data 'no-telemetry'
+    if ($state -eq 'off') {
+        New-Item -ItemType File -Force $marker | Out-Null
+        "Essential telemetry is blocked for '$name'. Restart its window to apply."
+    } elseif ($state -eq 'on') {
+        Remove-Item -LiteralPath $marker -Force -ErrorAction SilentlyContinue
+        "Essential telemetry is allowed again for '$name'. Restart its window to apply."
+    } else {
+        throw 'Use: ccm telemetry <name> off|on'
+    }
+}
+
+function Open-Code($name, $cliArgs) {
+    $data = Get-ExistingAccountDir $name
+    $config = Join-Path $data 'claude-config'
+    New-Item -ItemType Directory -Force $config | Out-Null
+    $cli = $null
+    foreach ($base in @($data, $MainData)) {
+        $found = Get-ChildItem -LiteralPath (Join-Path $base 'claude-code') -Filter 'claude.exe' -Recurse -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+        if ($found) { $cli = $found.FullName; break }
+    }
+    if (-not $cli) {
+        $command = Get-Command claude.exe -ErrorAction SilentlyContinue
+        if ($command) { $cli = $command.Source }
+    }
+    if (-not $cli) { throw 'Claude Code CLI not found. Open the Code tab in a Claude window once, then retry.' }
+    $env:CLAUDE_CONFIG_DIR = $config
+    & $cli @cliArgs
+}
+
+# Base64 UUID the app writes into each data folder; base64 of a UUID string.
+function Get-DeviceId($data) {
+    $file = Join-Path $data 'ant-did'
+    if (-not (Test-Path -LiteralPath $file)) { return $null }
+    try { return [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String((Get-Content -LiteralPath $file -Raw).Trim())) }
+    catch { return 'unreadable' }
+}
+
+function Get-MachineIdFile($file) {
+    if (-not (Test-Path -LiteralPath $file)) { return $null }
+    try { return (Get-Content -LiteralPath $file -Raw | ConvertFrom-Json).machineID } catch { return 'unreadable' }
+}
+
+# Shows the identifiers each window keeps, so a shared install id, a missing per-account
+# config dir or a hostname device name is visible before it can link two accounts.
+function Show-Doctor {
+    $targets = @([pscustomobject]@{ Name = '(normal app)'; Data = $MainData })
+    Get-ChildItem -LiteralPath $Root -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+        $targets += [pscustomobject]@{ Name = $_.Name; Data = $_.FullName }
+    }
+    $rows = foreach ($target in $targets) {
+        $configDir = Join-Path $target.Data 'claude-config'
+        $machineFile = if ($target.Name -eq '(normal app)') { Join-Path $HOME '.claude.json' } else { Join-Path $configDir '.claude.json' }
+        $deviceName = $null
+        $configFile = Join-Path $target.Data 'claude_desktop_config.json'
+        if (Test-Path -LiteralPath $configFile) {
+            try { $deviceName = (Get-Content -LiteralPath $configFile -Raw | ConvertFrom-Json).preferences.remoteToolsDeviceName } catch { }
+        }
+        [pscustomobject]@{
+            Account     = $target.Name
+            'install id' = Get-DeviceId $target.Data
+            'machine id' = Get-MachineIdFile $machineFile
+            'device name' = $deviceName
+            'code config' = Test-Path -LiteralPath $configDir
+            temp        = Test-Path -LiteralPath (Join-Path $target.Data 'temp')
+        }
+    }
+    $rows | Format-List
+
+    foreach ($column in @('install id', 'machine id', 'device name')) {
+        $values = @($rows | ForEach-Object { $_[$column] } | Where-Object { $_ })
+        $shared = @($values | Group-Object | Where-Object { $_.Count -gt 1 })
+        if ($shared.Count -gt 0) {
+            Write-Host ("PROBLEM: shared {0}: {1}" -f $column, (($shared | ForEach-Object { "$($_.Name) x$($_.Count)" }) -join ', ')) -ForegroundColor Red
+        }
+    }
+    $hostName = [Environment]::MachineName
+    if (@($rows | Where-Object { $_.Account -ne '(normal app)' -and $_.'device name' -eq $hostName }).Count -gt 0) {
+        Write-Host "Note: an account still advertises the hostname as its device name." -ForegroundColor Yellow
+    }
+    "Checked $($rows.Count) window(s). Every column above should differ per account."
 }
 
 # The desktop app records its own plan usage samples per window; show the latest one.
@@ -318,6 +434,10 @@ try {
         { $_ -in 'help', '-h', '--help' } { Show-Help }
         'add' { New-Account $rest[0] }
         { $_ -in 'list', 'ls' } { Show-Accounts }
+        'doctor' { Show-Doctor }
+        'isolate' { Initialize-Isolation $rest[0] (Get-ExistingAccountDir $rest[0]); "Isolation files are in place for '$($rest[0])'." }
+        'telemetry' { Set-Telemetry $rest[0] $rest[1] }
+        'claude' { Open-Code $rest[0] @($rest | Select-Object -Skip 1) }
         'usage' { Start-Process (Get-Exe) }
         { $_ -in 'remove', 'rm' } { Remove-Account $rest[0] ($rest -contains '--yes') }
         'rename' { Rename-Account $rest[0] $rest[1] }
