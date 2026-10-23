@@ -152,10 +152,8 @@ namespace ClaudeAccounts
 
         // The folder, icon and Start menu shortcut are made by the same ccm script the
         // command line uses, so both ways of adding an account stay in sync.
-        public static void Create(string name)
+        static void RunCcm(string arguments)
         {
-            var error = ValidateName(name);
-            if (error != null) throw new InvalidOperationException(error);
             var script = Path.Combine(Path.GetDirectoryName(Paths.Exe), "ccm.ps1");
             if (!File.Exists(script)) throw new InvalidOperationException("ccm.ps1 is missing next to ClaudeAccounts.exe.");
             var start = new ProcessStartInfo(FindPowerShell())
@@ -164,15 +162,28 @@ namespace ClaudeAccounts
                 CreateNoWindow = true,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
-                Arguments = "-NoLogo -NoProfile -ExecutionPolicy Bypass -File \"" + script + "\" add \"" + name + "\""
+                Arguments = "-NoLogo -NoProfile -ExecutionPolicy Bypass -File \"" + script + "\" " + arguments
             };
             using (var process = Process.Start(start))
             {
                 var output = process.StandardOutput.ReadToEnd() + process.StandardError.ReadToEnd();
                 process.WaitForExit();
                 if (process.ExitCode != 0)
-                    throw new InvalidOperationException(output.Trim().Length == 0 ? "ccm add " + name + " failed." : output.Trim());
+                    throw new InvalidOperationException(output.Trim().Length == 0 ? "ccm failed." : output.Trim());
             }
+        }
+
+        public static void Create(string name)
+        {
+            var error = ValidateName(name);
+            if (error != null) throw new InvalidOperationException(error);
+            RunCcm("add \"" + name + "\"");
+        }
+
+        public static void Remove(string name)
+        {
+            if (string.IsNullOrEmpty(name)) throw new InvalidOperationException("No account name.");
+            RunCcm("remove \"" + name + "\" --yes");
         }
 
         public static List<string> Names()
@@ -587,6 +598,72 @@ namespace ClaudeAccounts
         }
     }
 
+    // Dark button templates: the stock WPF template flashes the system accent on
+    // hover, which looks wrong inside these windows.
+    static class Theme
+    {
+        public const string DarkButton = @"
+  <Style x:Key='DarkButton' TargetType='Button'>
+    <Setter Property='Foreground' Value='#F4F4F5'/>
+    <Setter Property='Background' Value='#131315'/>
+    <Setter Property='BorderBrush' Value='#1E1E21'/>
+    <Setter Property='Padding' Value='10,8'/>
+    <Setter Property='Cursor' Value='Hand'/>
+    <Setter Property='Template'>
+      <Setter.Value>
+        <ControlTemplate TargetType='Button'>
+          <Border x:Name='Chrome' Background='{TemplateBinding Background}' BorderBrush='{TemplateBinding BorderBrush}'
+                  BorderThickness='1' CornerRadius='9' Padding='{TemplateBinding Padding}'>
+            <ContentPresenter HorizontalAlignment='Center' VerticalAlignment='Center'/>
+          </Border>
+          <ControlTemplate.Triggers>
+            <Trigger Property='IsMouseOver' Value='True'>
+              <Setter TargetName='Chrome' Property='Background' Value='#18181B'/>
+              <Setter TargetName='Chrome' Property='BorderBrush' Value='#2A2A2F'/>
+            </Trigger>
+            <Trigger Property='IsPressed' Value='True'>
+              <Setter TargetName='Chrome' Property='Background' Value='#0E0E10'/>
+            </Trigger>
+            <Trigger Property='IsEnabled' Value='False'>
+              <Setter Property='Opacity' Value='0.5'/>
+            </Trigger>
+          </ControlTemplate.Triggers>
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
+  </Style>";
+        public const string PrimaryButton = @"
+  <Style x:Key='PrimaryButton' TargetType='Button'>
+    <Setter Property='Foreground' Value='White'/>
+    <Setter Property='Background' Value='#2563EB'/>
+    <Setter Property='BorderBrush' Value='#2563EB'/>
+    <Setter Property='Padding' Value='14,6'/>
+    <Setter Property='Cursor' Value='Hand'/>
+    <Setter Property='Template'>
+      <Setter.Value>
+        <ControlTemplate TargetType='Button'>
+          <Border x:Name='Chrome' Background='{TemplateBinding Background}' BorderBrush='{TemplateBinding BorderBrush}'
+                  BorderThickness='1' CornerRadius='6' Padding='{TemplateBinding Padding}'>
+            <ContentPresenter HorizontalAlignment='Center' VerticalAlignment='Center'/>
+          </Border>
+          <ControlTemplate.Triggers>
+            <Trigger Property='IsMouseOver' Value='True'>
+              <Setter TargetName='Chrome' Property='Background' Value='#3B82F6'/>
+              <Setter TargetName='Chrome' Property='BorderBrush' Value='#3B82F6'/>
+            </Trigger>
+            <Trigger Property='IsPressed' Value='True'>
+              <Setter TargetName='Chrome' Property='Background' Value='#1D4ED8'/>
+            </Trigger>
+          </ControlTemplate.Triggers>
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
+  </Style>";
+
+        public const string UsageWindowResources = DarkButton;
+        public const string DialogResources = DarkButton + PrimaryButton;
+    }
+
     class UsageWindow
     {
         const string Layout = @"
@@ -595,6 +672,7 @@ namespace ClaudeAccounts
         Title='Claude accounts' Width='400' SizeToContent='Height' ResizeMode='CanMinimize'
         Background='#0B0B0C' FontFamily='Segoe UI Variable Text, Segoe UI' FontSize='13'
         WindowStartupLocation='Manual' UseLayoutRounding='True' TextOptions.TextFormattingMode='Display'>
+  <Window.Resources>" + Theme.UsageWindowResources + @"</Window.Resources>
   <ScrollViewer VerticalScrollBarVisibility='Auto'>
   <StackPanel Margin='12,2,12,12'>
     <ItemsControl x:Name='List'>
@@ -664,8 +742,8 @@ namespace ClaudeAccounts
         </DataTemplate>
       </ItemsControl.ItemTemplate>
     </ItemsControl>
-    <Button x:Name='Add' Margin='0,10,0,0' Padding='10,8' HorizontalContentAlignment='Center'
-            Background='#131315' Foreground='#F4F4F5' BorderBrush='#1E1E21' BorderThickness='1' Cursor='Hand'>
+    <Button x:Name='Add' Style='{StaticResource DarkButton}' Margin='0,10,0,0' Padding='10,9'
+            HorizontalContentAlignment='Center'>
       <TextBlock Text='+ Add account' FontSize='13'/>
     </Button>
     <TextBlock Foreground='#52525B' FontSize='11' Margin='2,10,2,0' TextWrapping='Wrap'
@@ -698,6 +776,25 @@ namespace ClaudeAccounts
                 }
                 if (row != null) Accounts.Open(row.Name);
             };
+            list.ContextMenuOpening += delegate(object sender, ContextMenuEventArgs e)
+            {
+                var row = RowAt(e.OriginalSource);
+                if (row == null) { e.Handled = true; return; }
+                var menu = new ContextMenu();
+                var open = new MenuItem { Header = "Open" };
+                open.Click += delegate { Accounts.Open(row.Name); };
+                menu.Items.Add(open);
+                if (row.Name != null)
+                {
+                    var remove = new MenuItem { Header = "Remove account..." };
+                    remove.Click += delegate { RemoveAccount(row); };
+                    menu.Items.Add(new Separator());
+                    menu.Items.Add(remove);
+                }
+                e.Handled = true;
+                menu.PlacementTarget = list;
+                menu.IsOpen = true;
+            };
             ((Button)Window.FindName("Add")).Click += delegate
             {
                 var name = AddAccountDialog.Show(Window);
@@ -725,6 +822,36 @@ namespace ClaudeAccounts
             Window.MaxHeight = area.Height - 24;
             Window.Left = area.Right - Window.ActualWidth - 12;
             Window.Top = area.Bottom - Window.ActualHeight - 12;
+        }
+
+        static AccountRow RowAt(object source)
+        {
+            var current = source as DependencyObject;
+            while (current != null)
+            {
+                var element = current as FrameworkElement;
+                if (element != null && element.DataContext is AccountRow) return (AccountRow)element.DataContext;
+                current = VisualTreeHelper.GetParent(current);
+            }
+            return null;
+        }
+
+        void RemoveAccount(AccountRow row)
+        {
+            var answer = MessageBox.Show(Window,
+                "Delete the '" + row.Name + "' window, its saved sign-in and local data?\n\n" +
+                "Its folder, device id and Claude Code credentials are deleted. Code history in ~\\.claude is kept.",
+                "Claude accounts", MessageBoxButton.YesNo, MessageBoxImage.Warning);
+            if (answer != MessageBoxResult.Yes) return;
+            try
+            {
+                Accounts.Remove(row.Name);
+                Refresh();
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(Window, ex.Message, "Claude accounts", MessageBoxButton.OK, MessageBoxImage.Warning);
+            }
         }
 
         public void Refresh()
@@ -758,6 +885,7 @@ namespace ClaudeAccounts
         Title='Add account' Width='380' SizeToContent='Height' ResizeMode='NoResize'
         WindowStartupLocation='CenterOwner' ShowInTaskbar='False'
         Background='#0B0B0C' FontFamily='Segoe UI Variable Text, Segoe UI' FontSize='13'>
+  <Window.Resources>" + Theme.DialogResources + @"</Window.Resources>
   <StackPanel Margin='16'>
     <TextBlock Text='Name for the new account window' Foreground='#A1A1AA'/>
     <TextBox x:Name='Name' Margin='0,8,0,0' Padding='8,6' Background='#131315' Foreground='#F4F4F5'
@@ -765,10 +893,8 @@ namespace ClaudeAccounts
     <TextBlock x:Name='Hint' Foreground='#F87171' FontSize='11.5' Margin='0,6,0,0'
                TextWrapping='Wrap' Visibility='Collapsed'/>
     <StackPanel Orientation='Horizontal' HorizontalAlignment='Right' Margin='0,14,0,0'>
-      <Button x:Name='Cancel' Content='Cancel' Padding='14,6' Margin='0,0,8,0' IsCancel='True'
-              Background='#131315' Foreground='#F4F4F5' BorderBrush='#2A2A2F'/>
-      <Button x:Name='Ok' Content='Add' Padding='14,6' IsDefault='True'
-              Background='#2563EB' Foreground='White' BorderBrush='#2563EB'/>
+      <Button x:Name='Cancel' Content='Cancel' Style='{StaticResource DarkButton}' Padding='14,6' Margin='0,0,8,0' IsCancel='True'/>
+      <Button x:Name='Ok' Content='Add' Style='{StaticResource PrimaryButton}' Padding='14,6' IsDefault='True'/>
     </StackPanel>
   </StackPanel>
 </Window>";

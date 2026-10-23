@@ -49,7 +49,7 @@ cd claude-desktop-multi-account
 
    Or use **+ Add account** at the bottom of the `Claude accounts` usage window, or right-click the tray icon and choose **Add account...**. Both ask for a name and open the new window for sign-in.
 
-2. Open `Claude work` from the Start menu.
+2. Open `Claude work` from the Start menu (right-click a card in the usage window to remove an account later).
 3. Sign in with **Continue with email**, then type the verification code from the email link into that window. See the note on Google below.
 4. Right-click its taskbar icon and choose **Pin to taskbar**. After a restart, click the pinned icons; every window is still signed in.
 5. Open `Claude accounts` from the Start menu for the usage window. You can pin that too.
@@ -67,7 +67,7 @@ Google sign-in does not work in the extra windows. It finishes in your browser a
 | `ccm usage` | Open the usage window |
 | `ccm list` | The same numbers as text |
 | `ccm rename <old> <new>` | Rename an account (quit its window first; the sign-in moves with it) |
-| `ccm remove <name>` | Delete an account window and its saved sign-in (Claude Code history is kept) |
+| `ccm remove <name>` | Delete an account window, its saved sign-in, Claude Code config and credentials, and local app data (Claude Code history in `~\.claude` is kept) |
 | `ccm shortcuts` | Recreate the shortcuts and icons, including pinned ones |
 | `ccm build` | Rebuild `ClaudeAccounts.exe` |
 | `ccm install` | Build, create shortcuts, and make `ccm` available in every terminal |

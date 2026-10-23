@@ -391,6 +391,19 @@ function Show-Accounts {
     $rows | Format-Table -AutoSize
 }
 
+# Claude Code keeps its OAuth token in Windows Credential Manager under a name derived
+# from the config directory. That entry lives outside the profile, so remove it too.
+function Remove-CodeCredentials($data) {
+    $config = Join-Path $data 'claude-config'
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = [Text.Encoding]::UTF8.GetBytes($config.Normalize([Text.NormalizationForm]::FormC))
+        $hash = -join ($sha.ComputeHash($bytes) | ForEach-Object { $_.ToString('x2') })
+    } finally { $sha.Dispose() }
+    $target = 'Claude Code-credentials-' + $hash.Substring(0, 8)
+    & cmd.exe /c ('cmdkey /delete:"' + $target + '"') 2>$null | Out-Null
+}
+
 function Remove-Account($name, $skipPrompt) {
     $data = Get-ExistingAccountDir $name
     if (Test-Open $data) { throw "The Claude window for '$name' is still running. Quit it first (tray icon > Quit)." }
@@ -399,6 +412,9 @@ function Remove-Account($name, $skipPrompt) {
         if ($answer -ne $name) { return 'Cancelled.' }
     }
     Remove-Item -LiteralPath (Join-Path $Shortcuts "Claude $name.lnk") -Force -ErrorAction SilentlyContinue
+    $pinned = Join-Path $env:APPDATA 'Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar'
+    Remove-Item -LiteralPath (Join-Path $pinned "Claude $name.lnk") -Force -ErrorAction SilentlyContinue
+    Remove-CodeCredentials $data
     Remove-Item -LiteralPath $data -Recurse -Force
     "Removed '$name'."
 }
