@@ -125,6 +125,56 @@ namespace ClaudeAccounts
             return name == null ? Paths.MainData : Path.Combine(Paths.Root, name);
         }
 
+        // Kept in sync with $Reserved in ccm.ps1.
+        static readonly HashSet<string> ReservedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "add", "list", "ls", "remove", "rm", "rename", "shortcuts", "usage", "build",
+            "install", "doctor", "isolate", "claude", "telemetry", "help"
+        };
+
+        public static string ValidateName(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return "Enter a name for the account window.";
+            if (!Regex.IsMatch(name, @"^[A-Za-z0-9][A-Za-z0-9._-]*$"))
+                return "Use letters, digits, . _ - (must start with a letter or digit).";
+            if (ReservedNames.Contains(name)) return "'" + name + "' is a ccm command name; choose another.";
+            if (Directory.Exists(Path.Combine(Paths.Root, name))) return "Account '" + name + "' already exists.";
+            return null;
+        }
+
+        static string FindPowerShell()
+        {
+            var pwsh = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), @"PowerShell\7\pwsh.exe");
+            if (File.Exists(pwsh)) return pwsh;
+            var legacy = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), @"WindowsPowerShell\v1.0\powershell.exe");
+            return File.Exists(legacy) ? legacy : "powershell.exe";
+        }
+
+        // The folder, icon and Start menu shortcut are made by the same ccm script the
+        // command line uses, so both ways of adding an account stay in sync.
+        public static void Create(string name)
+        {
+            var error = ValidateName(name);
+            if (error != null) throw new InvalidOperationException(error);
+            var script = Path.Combine(Path.GetDirectoryName(Paths.Exe), "ccm.ps1");
+            if (!File.Exists(script)) throw new InvalidOperationException("ccm.ps1 is missing next to ClaudeAccounts.exe.");
+            var start = new ProcessStartInfo(FindPowerShell())
+            {
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                Arguments = "-NoLogo -NoProfile -ExecutionPolicy Bypass -File \"" + script + "\" add \"" + name + "\""
+            };
+            using (var process = Process.Start(start))
+            {
+                var output = process.StandardOutput.ReadToEnd() + process.StandardError.ReadToEnd();
+                process.WaitForExit();
+                if (process.ExitCode != 0)
+                    throw new InvalidOperationException(output.Trim().Length == 0 ? "ccm add " + name + " failed." : output.Trim());
+            }
+        }
+
         public static List<string> Names()
         {
             if (!Directory.Exists(Paths.Root)) return new List<string>();
@@ -614,6 +664,10 @@ namespace ClaudeAccounts
         </DataTemplate>
       </ItemsControl.ItemTemplate>
     </ItemsControl>
+    <Button x:Name='Add' Margin='0,10,0,0' Padding='10,8' HorizontalContentAlignment='Center'
+            Background='#131315' Foreground='#F4F4F5' BorderBrush='#1E1E21' BorderThickness='1' Cursor='Hand'>
+      <TextBlock Text='+ Add account' FontSize='13'/>
+    </Button>
     <TextBlock Foreground='#52525B' FontSize='11' Margin='2,10,2,0' TextWrapping='Wrap'
                Text='Numbers are what each Claude window last saved. Click a card to open that account.'/>
   </StackPanel>
@@ -643,6 +697,21 @@ namespace ClaudeAccounts
                     while (parent != null && row == null) { row = parent.DataContext as AccountRow; parent = VisualTreeHelper.GetParent(parent) as FrameworkElement; }
                 }
                 if (row != null) Accounts.Open(row.Name);
+            };
+            ((Button)Window.FindName("Add")).Click += delegate
+            {
+                var name = AddAccountDialog.Show(Window);
+                if (name == null) return;
+                try
+                {
+                    Accounts.Create(name);
+                    Accounts.Open(name);
+                    Refresh();
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(Window, ex.Message, "Claude accounts", MessageBoxButton.OK, MessageBoxImage.Warning);
+                }
             };
             var timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(20) };
             timer.Tick += delegate { if (Window.IsVisible) Refresh(); };
@@ -681,6 +750,54 @@ namespace ClaudeAccounts
         }
     }
 
+    class AddAccountDialog
+    {
+        const string Layout = @"
+<Window xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation'
+        xmlns:x='http://schemas.microsoft.com/winfx/2006/xaml'
+        Title='Add account' Width='380' SizeToContent='Height' ResizeMode='NoResize'
+        WindowStartupLocation='CenterOwner' ShowInTaskbar='False'
+        Background='#0B0B0C' FontFamily='Segoe UI Variable Text, Segoe UI' FontSize='13'>
+  <StackPanel Margin='16'>
+    <TextBlock Text='Name for the new account window' Foreground='#A1A1AA'/>
+    <TextBox x:Name='Name' Margin='0,8,0,0' Padding='8,6' Background='#131315' Foreground='#F4F4F5'
+             BorderBrush='#2A2A2F' CaretBrush='#F4F4F5'/>
+    <TextBlock x:Name='Hint' Foreground='#F87171' FontSize='11.5' Margin='0,6,0,0'
+               TextWrapping='Wrap' Visibility='Collapsed'/>
+    <StackPanel Orientation='Horizontal' HorizontalAlignment='Right' Margin='0,14,0,0'>
+      <Button x:Name='Cancel' Content='Cancel' Padding='14,6' Margin='0,0,8,0' IsCancel='True'
+              Background='#131315' Foreground='#F4F4F5' BorderBrush='#2A2A2F'/>
+      <Button x:Name='Ok' Content='Add' Padding='14,6' IsDefault='True'
+              Background='#2563EB' Foreground='White' BorderBrush='#2563EB'/>
+    </StackPanel>
+  </StackPanel>
+</Window>";
+
+        public static string Show(Window owner)
+        {
+            var window = (Window)XamlReader.Parse(Layout);
+            window.Owner = owner;
+            var name = (TextBox)window.FindName("Name");
+            var hint = (TextBlock)window.FindName("Hint");
+            var result = (string)null;
+            ((Button)window.FindName("Ok")).Click += delegate
+            {
+                var value = name.Text.Trim();
+                var error = Accounts.ValidateName(value);
+                if (error != null)
+                {
+                    hint.Text = error;
+                    hint.Visibility = Visibility.Visible;
+                    return;
+                }
+                result = value;
+                window.DialogResult = true;
+            };
+            name.Focus();
+            return window.ShowDialog() == true ? result : null;
+        }
+    }
+
     static class Program
     {
         // `ClaudeAccounts.exe`              show the usage window (its own process, exits on close)
@@ -699,6 +816,13 @@ namespace ClaudeAccounts
                 return;
             }
             if (command == "tray") { RunTray(); return; }
+            if (command == "add" && args.Length > 1)
+            {
+                Accounts.Create(args[1]);
+                Accounts.Open(args[1]);
+                StartTray();
+                return;
+            }
             RunUsage();
         }
 
@@ -719,6 +843,7 @@ namespace ClaudeAccounts
 
                 var tray = new Forms.NotifyIcon { Icon = Paths.Icon(), Text = "Claude accounts", Visible = true };
                 var menu = new Forms.ContextMenuStrip();
+                menu.Items.Add("Add account...", null, delegate { AddAccountFromTray(); });
                 menu.Items.Add("Show usage", null, delegate { ShowUsage(); });
                 menu.Items.Add("Quit", null, delegate
                 {
@@ -750,6 +875,52 @@ namespace ClaudeAccounts
                 using (var quit = EventWaitHandle.OpenExisting("ClaudeAccounts.UsageQuit")) quit.Set();
             }
             catch { }
+        }
+
+        static void AddAccountFromTray()
+        {
+            while (true)
+            {
+                var name = PromptAccountName();
+                if (string.IsNullOrEmpty(name)) return;
+                try
+                {
+                    Accounts.Create(name);
+                    Accounts.Open(name);
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    Forms.MessageBox.Show(ex.Message, "Add account", Forms.MessageBoxButtons.OK, Forms.MessageBoxIcon.Warning);
+                }
+            }
+        }
+
+        static string PromptAccountName()
+        {
+            using (var form = new Forms.Form
+            {
+                Text = "Add account",
+                ClientSize = new System.Drawing.Size(360, 118),
+                FormBorderStyle = Forms.FormBorderStyle.FixedDialog,
+                StartPosition = Forms.FormStartPosition.CenterScreen,
+                MinimizeBox = false,
+                MaximizeBox = false,
+                ShowInTaskbar = false
+            })
+            {
+                var label = new Forms.Label { Text = "Name for the new account window:", Left = 12, Top = 12, Width = 330 };
+                var box = new Forms.TextBox { Left = 12, Top = 36, Width = 330 };
+                var ok = new Forms.Button { Text = "Add", DialogResult = Forms.DialogResult.OK, Left = 250, Top = 76, Width = 80 };
+                var cancel = new Forms.Button { Text = "Cancel", DialogResult = Forms.DialogResult.Cancel, Left = 160, Top = 76, Width = 80 };
+                form.Controls.Add(label);
+                form.Controls.Add(box);
+                form.Controls.Add(ok);
+                form.Controls.Add(cancel);
+                form.AcceptButton = ok;
+                form.CancelButton = cancel;
+                return form.ShowDialog() == Forms.DialogResult.OK ? box.Text.Trim() : null;
+            }
         }
 
         // WPF lives only in this process and dies with its window, so the memory is returned.

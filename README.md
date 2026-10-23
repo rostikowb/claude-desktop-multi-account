@@ -47,6 +47,8 @@ cd claude-desktop-multi-account
    ccm add personal
    ```
 
+   Or use **+ Add account** at the bottom of the `Claude accounts` usage window, or right-click the tray icon and choose **Add account...**. Both ask for a name and open the new window for sign-in.
+
 2. Open `Claude work` from the Start menu.
 3. Sign in with **Continue with email**, then type the verification code from the email link into that window. See the note on Google below.
 4. Right-click its taskbar icon and choose **Pin to taskbar**. After a restart, click the pinned icons; every window is still signed in.
