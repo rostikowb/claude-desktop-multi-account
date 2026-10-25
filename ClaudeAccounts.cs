@@ -78,6 +78,12 @@ namespace ClaudeAccounts
     }
 
     // One card in the window. Everything the template binds to is a public property.
+    public class RowLine
+    {
+        public string Text { get; set; }
+        public Brush Brush { get; set; }
+    }
+
     public class AccountRow
     {
         public string Name { get; set; }
@@ -97,6 +103,7 @@ namespace ClaudeAccounts
         public GridLength WeekRest { get; set; }
         public Brush WeekBrush { get; set; }
         public List<string> Lines { get; set; }
+        public List<RowLine> ResetLines { get; set; }
     }
 
     static class Accounts
@@ -105,6 +112,8 @@ namespace ClaudeAccounts
         static readonly string[] Colors = { "#2563EB", "#16A34A", "#7C3AED", "#DB2777", "#0D9488", "#475569", "#B45309", "#DC2626" };
         static readonly TimeSpan FiveHours = TimeSpan.FromHours(5);
         static readonly TimeSpan Week = TimeSpan.FromDays(7);
+        static readonly Brush ResetBrush = Solid("#FCD34D");
+        static readonly Brush MutedBrush = Solid("#71717A");
 
         static Brush Solid(string hex)
         {
@@ -263,13 +272,13 @@ namespace ClaudeAccounts
         }
 
         // Claude Code caches its latest usage answer, reset times included, for one account.
-        static List<CachedLimit> ReadCachedLimits(out string account)
+        static List<CachedLimit> ReadCachedLimits(string file, out string account)
         {
             account = null;
             var limits = new List<CachedLimit>();
             try
             {
-                var cache = ReadJson(Paths.CodeState)["cachedUsageUtilization"] as Dictionary<string, object>;
+                var cache = ReadJson(file)["cachedUsageUtilization"] as Dictionary<string, object>;
                 account = cache["accountUuid"] as string;
                 var utilization = cache["utilization"] as Dictionary<string, object>;
                 foreach (Dictionary<string, object> entry in (ArrayList)utilization["limits"])
@@ -297,24 +306,101 @@ namespace ClaudeAccounts
             return time.ToString(time.Date == DateTime.Today ? "HH:mm" : "ddd d MMM, HH:mm");
         }
 
-        // A limit only falls when its window resets. Walking back from the newest sample
-        // while the number never falls finds the oldest moment we know the current window
-        // already existed; it cannot last longer than `length` past that. `before` is the
-        // sample just ahead of a fall, which brackets the reset from the other side.
-        static DateTime? WindowKnownSince(List<Sample> samples, Func<Sample, double?> pick, TimeSpan length, out DateTime? before)
+        static RowLine Line(string text, Brush brush)
         {
-            before = null;
-            var last = samples[samples.Count - 1];
-            if (!pick(last).HasValue || pick(last).Value <= 0) return null;
-            var since = last.Time;
-            for (int i = samples.Count - 2; i >= 0; i--)
+            return new RowLine { Text = text, Brush = brush };
+        }
+
+        static string ShortLeft(TimeSpan span, bool roundUp)
+        {
+            if (span <= TimeSpan.Zero) return "now";
+            if (span.TotalDays >= 1)
+            {
+                int days = (int)Math.Floor(span.TotalDays);
+                int hours = span.Hours;
+                if (roundUp && (span.Minutes > 0 || span.Seconds > 0))
+                {
+                    hours++;
+                    if (hours == 24) { days++; hours = 0; }
+                }
+                return days + "d " + hours + "h";
+            }
+            if (span.TotalHours >= 1)
+            {
+                int hours = (int)Math.Floor(span.TotalHours);
+                int minutes = span.Minutes;
+                if (roundUp && span.Seconds > 0)
+                {
+                    minutes++;
+                    if (minutes == 60) { hours++; minutes = 0; }
+                }
+                return hours + "h " + minutes + "m";
+            }
+            return Math.Max(1, (int)Math.Ceiling(span.TotalMinutes)) + "m";
+        }
+
+        static string WindowsLeft(TimeSpan span)
+        {
+            return Math.Max(0, (int)Math.Floor(span.TotalHours / 5)).ToString(CultureInfo.InvariantCulture);
+        }
+
+        static void AddReset(AccountRow row, string label, DateTime? earliest, DateTime? latest, bool exact, DateTime now)
+        {
+            if (!latest.HasValue) return;
+            var text = label + " resets ";
+            var span = latest.Value - now;
+            var ranged = !exact && earliest.HasValue && earliest.Value > now && latest.Value - earliest.Value > TimeSpan.FromMinutes(1);
+            if (exact) text += "at " + When(latest.Value) + " (exact)";
+            else if (ranged) text += "between " + When(earliest.Value) + " and " + When(latest.Value) + " (estimated)";
+            else text += "not later than " + When(latest.Value) + " (estimated)";
+            if (span > TimeSpan.Zero)
+            {
+                text += " · in " + (exact ? "" : "≤ ") + ShortLeft(span, !exact);
+                if (label == "Weekly")
+                    text += exact ? " · ≈ " + WindowsLeft(span) + " × 5h windows"
+                                  : " · ≈ up to " + WindowsLeft(span) + " × 5h windows";
+            }
+            else text += " · reset passed";
+            row.ResetLines.Add(Line(text, ResetBrush));
+        }
+
+        // The reset time lies between the sample before the window started and the first
+        // sample of the new window. Without such a pair the oldest sample only bounds it.
+        static void ResetBounds(List<Sample> samples, Func<Sample, double?> pick, TimeSpan length, out DateTime? earliest, out DateTime? latest)
+        {
+            earliest = null;
+            latest = null;
+            if (samples.Count == 0) return;
+            for (int i = samples.Count - 1; i >= 1; i--)
+            {
+                var current = pick(samples[i]);
+                var previous = pick(samples[i - 1]);
+                if (!current.HasValue || !previous.HasValue) continue;
+                if (previous.Value - current.Value > 4 || (previous.Value <= 0 && current.Value > 0))
+                {
+                    earliest = samples[i - 1].Time + length;
+                    latest = samples[i].Time + length;
+                    return;
+                }
+            }
+            var first = pick(samples[0]);
+            if (!first.HasValue) return;
+            if (first.Value > 0)
+            {
+                earliest = samples[0].Time;
+                latest = samples[0].Time + length;
+                return;
+            }
+            for (int i = 1; i < samples.Count; i++)
             {
                 var value = pick(samples[i]);
-                if (!value.HasValue || last.Time - samples[i].Time >= length) break;
-                if (value.Value > pick(samples[i + 1]).Value + 4) { before = samples[i].Time; break; }
-                if (value.Value > 0) since = samples[i].Time;
+                if (value.HasValue && value.Value > 0)
+                {
+                    earliest = samples[0].Time + length;
+                    latest = samples[i].Time + length;
+                    return;
+                }
             }
-            return since;
         }
 
         static Brush BarBrush(double percent)
@@ -343,7 +429,8 @@ namespace ClaudeAccounts
                 StatusBrush = Solid(running ? "#4ADE80" : "#6B6B73"),
                 UsageVisibility = Visibility.Collapsed,
                 WeekVisibility = Visibility.Collapsed,
-                Lines = new List<string>()
+                Lines = new List<string>(),
+                ResetLines = new List<RowLine>()
             };
             if (samples.Count == 0)
             {
@@ -359,21 +446,25 @@ namespace ClaudeAccounts
             GridLength fill, rest;
             Brush brush;
 
-            // 5-hour limit. A number saved more than five hours ago describes a window that is over.
+            // 5-hour limit. A saved number older than five hours describes a window that is over.
             var session = cached.FirstOrDefault(limit => limit.Kind == "session" && limit.ResetsAt > now);
             if (now - last.Time >= FiveHours)
             {
                 SetBar(0, out fill, out rest, out brush);
                 row.FiveText = "reset";
+                row.ResetLines.Add(Line("5-hour window is idle — the next message starts a new one", MutedBrush));
             }
             else
             {
                 SetBar(last.FiveHour ?? 0, out fill, out rest, out brush);
-                row.FiveText = last.FiveHour.HasValue ? (last.FiveHour.Value).ToString("0") + "%" : "n/a";
-                DateTime? before;
-                var since = WindowKnownSince(samples, s => s.FiveHour, FiveHours, out before);
-                if (session != null) row.Lines.Add("5-hour limit resets at " + When(session.ResetsAt));
-                else if (since.HasValue) row.Lines.Add("5-hour limit resets by " + When(since.Value + FiveHours) + " at the latest");
+                row.FiveText = last.FiveHour.HasValue ? last.FiveHour.Value.ToString("0") + "%" : "n/a";
+                if (session != null) AddReset(row, "5-hour", session.ResetsAt, session.ResetsAt, true, now);
+                else
+                {
+                    DateTime? earliest, latest;
+                    ResetBounds(samples, s => s.FiveHour, FiveHours, out earliest, out latest);
+                    if (latest.HasValue) AddReset(row, "5-hour", earliest, latest, false, now);
+                }
             }
             row.FiveFill = fill; row.FiveRest = rest; row.FiveBrush = brush;
 
@@ -383,21 +474,19 @@ namespace ClaudeAccounts
                 row.WeekVisibility = Visibility.Visible;
                 SetBar(last.Week.Value, out fill, out rest, out brush);
                 row.WeekText = last.Week.Value.ToString("0") + "%";
-                DateTime? before;
-                var since = WindowKnownSince(samples, s => s.Week, Week, out before);
                 var weekly = cached.FirstOrDefault(limit => limit.Kind != "session" && limit.Model == null && limit.ResetsAt > now);
-                if (weekly != null) row.Lines.Add("Weekly limit resets " + When(weekly.ResetsAt));
-                else if (since.HasValue)
+                if (weekly != null) AddReset(row, "Weekly", weekly.ResetsAt, weekly.ResetsAt, true, now);
+                else
                 {
-                    var latest = since.Value + Week;
-                    if (latest <= now)
+                    DateTime? earliest, latest;
+                    ResetBounds(samples, s => s.Week, Week, out earliest, out latest);
+                    if (!latest.HasValue || latest.Value <= now)
                     {
                         SetBar(0, out fill, out rest, out brush);
                         row.WeekText = "reset";
+                        row.ResetLines.Add(Line("Weekly window has reset — the next message starts a new one", MutedBrush));
                     }
-                    else if (before.HasValue && before.Value + Week > now && latest - (before.Value + Week) <= TimeSpan.FromHours(24))
-                        row.Lines.Add("Weekly limit resets between " + When(before.Value + Week) + " and " + When(latest));
-                    else row.Lines.Add("Weekly limit resets by " + When(latest) + " at the latest");
+                    else AddReset(row, "Weekly", earliest, latest, false, now);
                 }
                 row.WeekFill = fill; row.WeekRest = rest; row.WeekBrush = brush;
             }
@@ -413,8 +502,6 @@ namespace ClaudeAccounts
             var names = Names();
             var main = ReadFolder(null);
             var folders = names.Select(ReadFolder).ToList();
-            string cachedAccount;
-            var cached = ReadCachedLimits(out cachedAccount);
             var none = new List<CachedLimit>();
 
             var rows = new List<AccountRow>();
@@ -426,11 +513,18 @@ namespace ClaudeAccounts
                 // too, unless several of your windows share the organisation (team seats).
                 if (folder.Org != null && folders.Count(other => other.Org == folder.Org) == 1)
                     samples = samples.Concat(main.Samples.Where(s => s.Org == folder.Org)).OrderBy(s => s.Time).ToList();
-                rows.Add(Row(folder, samples, i, folder.Account != null && folder.Account == cachedAccount ? cached : none));
+                // Accounts get their own Claude Code config when started through the launcher.
+                string account;
+                var cacheFile = Path.Combine(folder.Dir, "claude-config", ".claude.json");
+                if (!File.Exists(cacheFile)) cacheFile = Paths.CodeState;
+                var limits = ReadCachedLimits(cacheFile, out account);
+                rows.Add(Row(folder, samples, i, folder.Account != null && folder.Account == account ? limits : none));
             }
             rows = rows.OrderBy(row => row.Name, StringComparer.OrdinalIgnoreCase).ToList();
+            string mainAccount;
+            var mainLimits = ReadCachedLimits(Paths.CodeState, out mainAccount);
             rows.Insert(0, Row(main, main.Samples.Where(s => s.Org == main.Org).ToList(), 0,
-                main.Account != null && main.Account == cachedAccount ? cached : none));
+                main.Account != null && main.Account == mainAccount ? mainLimits : none));
             return rows;
         }
 
@@ -730,7 +824,15 @@ namespace ClaudeAccounts
                 </Border>
                 <TextBlock Grid.Column='2' Text='{Binding WeekText}' Foreground='#F4F4F5' FontSize='12' HorizontalAlignment='Right'/>
               </Grid>
-              <ItemsControl ItemsSource='{Binding Lines}' Margin='0,9,0,0'>
+              <ItemsControl ItemsSource='{Binding ResetLines}' Margin='0,10,0,0'>
+                <ItemsControl.ItemTemplate>
+                  <DataTemplate>
+                    <TextBlock Text='{Binding Text}' Foreground='{Binding Brush}' FontSize='12' FontWeight='SemiBold'
+                               TextWrapping='Wrap' Margin='0,1,0,0'/>
+                  </DataTemplate>
+                </ItemsControl.ItemTemplate>
+              </ItemsControl>
+              <ItemsControl ItemsSource='{Binding Lines}' Margin='0,5,0,0'>
                 <ItemsControl.ItemTemplate>
                   <DataTemplate>
                     <TextBlock Text='{Binding}' Foreground='#71717A' FontSize='11.5' Margin='0,1,0,0' TextWrapping='Wrap'/>
@@ -747,7 +849,7 @@ namespace ClaudeAccounts
       <TextBlock Text='+ Add account' FontSize='13'/>
     </Button>
     <TextBlock Foreground='#52525B' FontSize='11' Margin='2,10,2,0' TextWrapping='Wrap'
-               Text='Numbers are what each Claude window last saved. Click a card to open that account.'/>
+               Text='Numbers are what each Claude window last saved. Reset times are exact when Claude Code cached them, otherwise estimated from those samples. Click a card to open that account.'/>
   </StackPanel>
   </ScrollViewer>
 </Window>";
