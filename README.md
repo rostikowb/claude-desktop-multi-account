@@ -1,5 +1,7 @@
 # claude-desktop-multi-account
 
+> Local changes are documented in [DOCUMENTATION.md](DOCUMENTATION.md) (Ukrainian) and [ISOLATION.md](ISOLATION.md).
+
 Run several Claude accounts side by side in the Claude desktop app on Windows: one window per account, each with its own taskbar icon, and no signing out and back in.
 
 On a Mac, see [macos/README.md](macos/README.md).
