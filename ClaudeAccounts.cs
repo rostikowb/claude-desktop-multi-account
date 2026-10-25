@@ -32,6 +32,16 @@ using Forms = System.Windows.Forms;
 
 namespace ClaudeAccounts
 {
+    // UI language follows the system UI language; dates follow the same culture.
+    static class L
+    {
+        static readonly bool uk = CultureInfo.CurrentUICulture.TwoLetterISOLanguageName == "uk"
+            || CultureInfo.CurrentCulture.TwoLetterISOLanguageName == "uk";
+        public static bool Uk { get { return uk; } }
+        public static string T(string en, string ukText) { return uk ? ukText : en; }
+        public static CultureInfo Culture { get { return uk ? CultureInfo.GetCultureInfo("uk-UA") : CultureInfo.CurrentCulture; } }
+    }
+
     static class Paths
     {
         static readonly string Home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
@@ -75,19 +85,24 @@ namespace ClaudeAccounts
         public List<Sample> Samples = new List<Sample>();
         public string Account;   // the account and organisation this window used last
         public string Org;
+        public DateTime? WeeklyReset; // manual correction from Settings > Usage, if any
     }
 
     // One card in the window. Everything the template binds to is a public property.
-    public class RowLine
+    public class ResetInfo
     {
-        public string Text { get; set; }
-        public Brush Brush { get; set; }
+        public string Label { get; set; }
+        public string Value { get; set; }
+        public string Detail { get; set; }
+        public Brush Accent { get; set; }
     }
 
     public class AccountRow
     {
         public string Name { get; set; }
         public string Title { get; set; }
+        public string FiveLabel { get; set; }
+        public string WeekLabel { get; set; }
         public string Label { get; set; }
         public Brush TagBrush { get; set; }
         public string Status { get; set; }
@@ -103,7 +118,7 @@ namespace ClaudeAccounts
         public GridLength WeekRest { get; set; }
         public Brush WeekBrush { get; set; }
         public List<string> Lines { get; set; }
-        public List<RowLine> ResetLines { get; set; }
+        public List<ResetInfo> Resets { get; set; }
     }
 
     static class Accounts
@@ -143,11 +158,14 @@ namespace ClaudeAccounts
 
         public static string ValidateName(string name)
         {
-            if (string.IsNullOrEmpty(name)) return "Enter a name for the account window.";
+            if (string.IsNullOrEmpty(name)) return L.T("Enter a name for the account window.", "Введіть назву для вікна акаунта.");
             if (!Regex.IsMatch(name, @"^[A-Za-z0-9][A-Za-z0-9._-]*$"))
-                return "Use letters, digits, . _ - (must start with a letter or digit).";
-            if (ReservedNames.Contains(name)) return "'" + name + "' is a ccm command name; choose another.";
-            if (Directory.Exists(Path.Combine(Paths.Root, name))) return "Account '" + name + "' already exists.";
+                return L.T("Use letters, digits, . _ - (must start with a letter or digit).",
+                           "Використовуйте літери, цифри, . _ - (назва має починатися з літери або цифри).");
+            if (ReservedNames.Contains(name)) return "'" + name + L.T("' is a ccm command name; choose another.",
+                                                                      "' — це назва команди ccm; виберіть іншу.");
+            if (Directory.Exists(Path.Combine(Paths.Root, name)))
+                return L.T("Account '", "Акаунт '") + name + L.T("' already exists.", "' вже існує.");
             return null;
         }
 
@@ -164,7 +182,7 @@ namespace ClaudeAccounts
         static void RunCcm(string arguments)
         {
             var script = Path.Combine(Path.GetDirectoryName(Paths.Exe), "ccm.ps1");
-            if (!File.Exists(script)) throw new InvalidOperationException("ccm.ps1 is missing next to ClaudeAccounts.exe.");
+            if (!File.Exists(script)) throw new InvalidOperationException(L.T("ccm.ps1 is missing next to ClaudeAccounts.exe.", "ccm.ps1 відсутній поруч із ClaudeAccounts.exe."));
             var start = new ProcessStartInfo(FindPowerShell())
             {
                 UseShellExecute = false,
@@ -178,7 +196,7 @@ namespace ClaudeAccounts
                 var output = process.StandardOutput.ReadToEnd() + process.StandardError.ReadToEnd();
                 process.WaitForExit();
                 if (process.ExitCode != 0)
-                    throw new InvalidOperationException(output.Trim().Length == 0 ? "ccm failed." : output.Trim());
+                    throw new InvalidOperationException(output.Trim().Length == 0 ? L.T("ccm failed.", "ccm завершився з помилкою.") : output.Trim());
             }
         }
 
@@ -191,8 +209,32 @@ namespace ClaudeAccounts
 
         public static void Remove(string name)
         {
-            if (string.IsNullOrEmpty(name)) throw new InvalidOperationException("No account name.");
+            if (string.IsNullOrEmpty(name)) throw new InvalidOperationException(L.T("No account name.", "Немає назви акаунта."));
             RunCcm("remove \"" + name + "\" --yes");
+        }
+
+        public static DateTime? WeeklyReset(string name)
+        {
+            try
+            {
+                var file = Path.Combine(DataDir(name), "ccm-reset.json");
+                if (!File.Exists(file)) return null;
+                object value;
+                if (!ReadJson(file).TryGetValue("weekly", out value) || !(value is string)) return null;
+                return DateTime.Parse((string)value, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind).ToLocalTime();
+            }
+            catch { return null; }
+        }
+
+        public static void SetWeeklyReset(string name, DateTime? value)
+        {
+            var file = Path.Combine(DataDir(name), "ccm-reset.json");
+            if (!value.HasValue)
+            {
+                if (File.Exists(file)) File.Delete(file);
+                return;
+            }
+            File.WriteAllText(file, "{\"weekly\":\"" + value.Value.ToString("o", CultureInfo.InvariantCulture) + "\"}");
         }
 
         public static List<string> Names()
@@ -268,6 +310,19 @@ namespace ClaudeAccounts
                 }
             }
             catch { }
+
+            // A manual correction from Settings > Usage takes precedence over estimates.
+            try
+            {
+                var resetFile = Path.Combine(folder.Dir, "ccm-reset.json");
+                if (File.Exists(resetFile))
+                {
+                    object value;
+                    if (ReadJson(resetFile).TryGetValue("weekly", out value) && value is string)
+                        folder.WeeklyReset = DateTime.Parse((string)value, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind).ToLocalTime();
+                }
+            }
+            catch { }
             return folder;
         }
 
@@ -303,17 +358,26 @@ namespace ClaudeAccounts
 
         static string When(DateTime time)
         {
-            return time.ToString(time.Date == DateTime.Today ? "HH:mm" : "ddd d MMM, HH:mm");
+            return time.ToString(time.Date == DateTime.Today ? "HH:mm" : "ddd d MMM, HH:mm", L.Culture);
         }
 
-        static RowLine Line(string text, Brush brush)
+        static void AddIdle(AccountRow row, string label, string detail)
         {
-            return new RowLine { Text = text, Brush = brush };
+            row.Resets.Add(new ResetInfo
+            {
+                Label = label,
+                Value = L.T("idle", "неактивне"),
+                Detail = detail,
+                Accent = MutedBrush
+            });
         }
 
         static string ShortLeft(TimeSpan span, bool roundUp)
         {
-            if (span <= TimeSpan.Zero) return "now";
+            var d = L.T("d ", "д ");
+            var h = L.T("h ", "год ");
+            var m = L.T("m", "хв");
+            if (span <= TimeSpan.Zero) return L.T("now", "зараз");
             if (span.TotalDays >= 1)
             {
                 int days = (int)Math.Floor(span.TotalDays);
@@ -323,7 +387,7 @@ namespace ClaudeAccounts
                     hours++;
                     if (hours == 24) { days++; hours = 0; }
                 }
-                return days + "d " + hours + "h";
+                return days + d + hours + h;
             }
             if (span.TotalHours >= 1)
             {
@@ -334,9 +398,9 @@ namespace ClaudeAccounts
                     minutes++;
                     if (minutes == 60) { hours++; minutes = 0; }
                 }
-                return hours + "h " + minutes + "m";
+                return hours + h + minutes + m;
             }
-            return Math.Max(1, (int)Math.Ceiling(span.TotalMinutes)) + "m";
+            return Math.Max(1, (int)Math.Ceiling(span.TotalMinutes)) + m;
         }
 
         static string WindowsLeft(TimeSpan span)
@@ -344,24 +408,32 @@ namespace ClaudeAccounts
             return Math.Max(0, (int)Math.Floor(span.TotalHours / 5)).ToString(CultureInfo.InvariantCulture);
         }
 
-        static void AddReset(AccountRow row, string label, DateTime? earliest, DateTime? latest, bool exact, DateTime now)
+        static void AddReset(AccountRow row, string label, DateTime? earliest, DateTime? latest, bool exact, bool manual, bool weekly, DateTime now)
         {
             if (!latest.HasValue) return;
-            var text = label + " resets ";
             var span = latest.Value - now;
-            var ranged = !exact && earliest.HasValue && earliest.Value > now && latest.Value - earliest.Value > TimeSpan.FromMinutes(1);
-            if (exact) text += "at " + When(latest.Value) + " (exact)";
-            else if (ranged) text += "between " + When(earliest.Value) + " and " + When(latest.Value) + " (estimated)";
-            else text += "not later than " + When(latest.Value) + " (estimated)";
+            var ranged = !exact && !manual && earliest.HasValue && earliest.Value > now && latest.Value - earliest.Value > TimeSpan.FromMinutes(1);
+            var value = (!ranged) ? When(latest.Value) : When(earliest.Value) + " – " + When(latest.Value);
+            var parts = new List<string>();
+            if (manual) parts.Add(L.T("manual", "вручну"));
+            else if (exact) parts.Add(L.T("exact", "точно"));
+            else if (ranged) parts.Add(L.T("estimated range", "оцінка, діапазон"));
+            else parts.Add(L.T("estimated upper bound", "оцінка, верхня межа"));
             if (span > TimeSpan.Zero)
             {
-                text += " · in " + (exact ? "" : "≤ ") + ShortLeft(span, !exact);
-                if (label == "Weekly")
-                    text += exact ? " · ≈ " + WindowsLeft(span) + " × 5h windows"
-                                  : " · ≈ up to " + WindowsLeft(span) + " × 5h windows";
+                parts.Add(L.T("in ", "через ") + ((exact || manual) ? "" : "≤ ") + ShortLeft(span, !exact && !manual));
+                if (weekly)
+                    parts.Add(((exact || manual) ? L.T("≈ ", "≈ ") : L.T("≈ up to ", "≈ до "))
+                        + WindowsLeft(span) + L.T(" × 5h windows", " × 5-год. вікон"));
             }
-            else text += " · reset passed";
-            row.ResetLines.Add(Line(text, ResetBrush));
+            else parts.Add(L.T("reset passed", "скидання минуло"));
+            row.Resets.Add(new ResetInfo
+            {
+                Label = label,
+                Value = value,
+                Detail = string.Join(" · ", parts.ToArray()),
+                Accent = ResetBrush
+            });
         }
 
         // The reset time lies between the sample before the window started and the first
@@ -422,26 +494,29 @@ namespace ClaudeAccounts
             var row = new AccountRow
             {
                 Name = folder.Name,
-                Title = folder.Name ?? "Main app",
+                Title = folder.Name ?? L.T("Main app", "Основний застосунок"),
+                FiveLabel = L.T("5-hour", "5-годинний"),
+                WeekLabel = L.T("Weekly", "Тижневий"),
                 Label = folder.Name == null ? "C" : LabelFor(folder.Name),
                 TagBrush = Solid(folder.Name == null ? "#D97757" : Colors[colorIndex % Colors.Length]),
-                Status = running ? "Open" : "Closed",
+                Status = running ? L.T("Open", "Відкрито") : L.T("Closed", "Закрито"),
                 StatusBrush = Solid(running ? "#4ADE80" : "#6B6B73"),
                 UsageVisibility = Visibility.Collapsed,
                 WeekVisibility = Visibility.Collapsed,
                 Lines = new List<string>(),
-                ResetLines = new List<RowLine>()
+                Resets = new List<ResetInfo>()
             };
             if (samples.Count == 0)
             {
-                row.Lines.Add("Not signed in yet. Click to open and sign in.");
+                row.Lines.Add(L.T("Not signed in yet. Click to open and sign in.",
+                                  "Ще не виконано вхід. Натисніть, щоб відкрити вікно й увійти."));
                 return row;
             }
 
             var now = DateTime.Now;
             var last = samples[samples.Count - 1];
             row.UsageVisibility = Visibility.Visible;
-            row.Lines.Add("Updated " + When(last.Time));
+            row.Lines.Add(L.T("Updated ", "Оновлено ") + When(last.Time));
 
             GridLength fill, rest;
             Brush brush;
@@ -451,19 +526,20 @@ namespace ClaudeAccounts
             if (now - last.Time >= FiveHours)
             {
                 SetBar(0, out fill, out rest, out brush);
-                row.FiveText = "reset";
-                row.ResetLines.Add(Line("5-hour window is idle — the next message starts a new one", MutedBrush));
+                row.FiveText = L.T("reset", "скинуто");
+                AddIdle(row, L.T("5-hour reset", "5-годинне скидання"),
+                             L.T("the next message starts a new window", "наступне повідомлення почне нове вікно"));
             }
             else
             {
                 SetBar(last.FiveHour ?? 0, out fill, out rest, out brush);
-                row.FiveText = last.FiveHour.HasValue ? last.FiveHour.Value.ToString("0") + "%" : "n/a";
-                if (session != null) AddReset(row, "5-hour", session.ResetsAt, session.ResetsAt, true, now);
+                row.FiveText = last.FiveHour.HasValue ? last.FiveHour.Value.ToString("0") + "%" : L.T("n/a", "н/д");
+                if (session != null) AddReset(row, L.T("5-hour reset", "5-годинне скидання"), session.ResetsAt, session.ResetsAt, true, false, false, now);
                 else
                 {
                     DateTime? earliest, latest;
                     ResetBounds(samples, s => s.FiveHour, FiveHours, out earliest, out latest);
-                    if (latest.HasValue) AddReset(row, "5-hour", earliest, latest, false, now);
+                    if (latest.HasValue) AddReset(row, L.T("5-hour reset", "5-годинне скидання"), earliest, latest, false, false, false, now);
                 }
             }
             row.FiveFill = fill; row.FiveRest = rest; row.FiveBrush = brush;
@@ -475,7 +551,10 @@ namespace ClaudeAccounts
                 SetBar(last.Week.Value, out fill, out rest, out brush);
                 row.WeekText = last.Week.Value.ToString("0") + "%";
                 var weekly = cached.FirstOrDefault(limit => limit.Kind != "session" && limit.Model == null && limit.ResetsAt > now);
-                if (weekly != null) AddReset(row, "Weekly", weekly.ResetsAt, weekly.ResetsAt, true, now);
+                if (folder.WeeklyReset.HasValue && folder.WeeklyReset.Value > now)
+                    AddReset(row, L.T("Weekly reset", "Тижневе скидання"), folder.WeeklyReset, folder.WeeklyReset, true, true, true, now);
+                else if (weekly != null)
+                    AddReset(row, L.T("Weekly reset", "Тижневе скидання"), weekly.ResetsAt, weekly.ResetsAt, true, false, true, now);
                 else
                 {
                     DateTime? earliest, latest;
@@ -483,17 +562,19 @@ namespace ClaudeAccounts
                     if (!latest.HasValue || latest.Value <= now)
                     {
                         SetBar(0, out fill, out rest, out brush);
-                        row.WeekText = "reset";
-                        row.ResetLines.Add(Line("Weekly window has reset — the next message starts a new one", MutedBrush));
+                        row.WeekText = L.T("reset", "скинуто");
+                        AddIdle(row, L.T("Weekly reset", "Тижневе скидання"),
+                                     L.T("the next message starts a new window", "наступне повідомлення почне нове вікно"));
                     }
-                    else AddReset(row, "Weekly", earliest, latest, false, now);
+                    else AddReset(row, L.T("Weekly reset", "Тижневе скидання"), earliest, latest, false, false, true, now);
                 }
                 row.WeekFill = fill; row.WeekRest = rest; row.WeekBrush = brush;
             }
 
             // Per-model weekly limits, such as Fable, exist only in Claude Code's snapshot.
             foreach (var limit in cached.Where(limit => limit.Model != null && limit.ResetsAt > now))
-                row.Lines.Add(limit.Model + " weekly limit: " + limit.Percent.ToString("0") + "% used, resets " + When(limit.ResetsAt));
+                row.Lines.Add(limit.Model + L.T(" weekly limit: ", " тижневий ліміт: ")
+                    + limit.Percent.ToString("0") + L.T("% used, resets ", "% використано, скидання ") + When(limit.ResetsAt));
             return row;
         }
 
@@ -798,7 +879,7 @@ namespace ClaudeAccounts
                 <Grid.ColumnDefinitions>
                   <ColumnDefinition Width='58'/><ColumnDefinition Width='*'/><ColumnDefinition Width='44'/>
                 </Grid.ColumnDefinitions>
-                <TextBlock Text='5-hour' Foreground='#A1A1AA' FontSize='12'/>
+                <TextBlock Text='{Binding FiveLabel}' Foreground='#A1A1AA' FontSize='12'/>
                 <Border Grid.Column='1' Height='4' CornerRadius='2' Background='#232326' VerticalAlignment='Center'>
                   <Grid>
                     <Grid.ColumnDefinitions>
@@ -813,7 +894,7 @@ namespace ClaudeAccounts
                 <Grid.ColumnDefinitions>
                   <ColumnDefinition Width='58'/><ColumnDefinition Width='*'/><ColumnDefinition Width='44'/>
                 </Grid.ColumnDefinitions>
-                <TextBlock Text='Weekly' Foreground='#A1A1AA' FontSize='12'/>
+                <TextBlock Text='{Binding WeekLabel}' Foreground='#A1A1AA' FontSize='12'/>
                 <Border Grid.Column='1' Height='4' CornerRadius='2' Background='#232326' VerticalAlignment='Center'>
                   <Grid>
                     <Grid.ColumnDefinitions>
@@ -824,11 +905,17 @@ namespace ClaudeAccounts
                 </Border>
                 <TextBlock Grid.Column='2' Text='{Binding WeekText}' Foreground='#F4F4F5' FontSize='12' HorizontalAlignment='Right'/>
               </Grid>
-              <ItemsControl ItemsSource='{Binding ResetLines}' Margin='0,10,0,0'>
+              <ItemsControl ItemsSource='{Binding Resets}' Margin='0,8,0,0'>
                 <ItemsControl.ItemTemplate>
                   <DataTemplate>
-                    <TextBlock Text='{Binding Text}' Foreground='{Binding Brush}' FontSize='12' FontWeight='SemiBold'
-                               TextWrapping='Wrap' Margin='0,1,0,0'/>
+                    <StackPanel Margin='0,2,0,0'>
+                      <TextBlock TextWrapping='Wrap'>
+                        <Run Text='{Binding Label}' Foreground='#A1A1AA'/>
+                        <Run Text=' '/>
+                        <Run Text='{Binding Value}' Foreground='{Binding Accent}' FontWeight='SemiBold'/>
+                      </TextBlock>
+                      <TextBlock Text='{Binding Detail}' Foreground='#71717A' FontSize='11.5' TextWrapping='Wrap' Margin='0,1,0,0'/>
+                    </StackPanel>
                   </DataTemplate>
                 </ItemsControl.ItemTemplate>
               </ItemsControl>
@@ -846,9 +933,9 @@ namespace ClaudeAccounts
     </ItemsControl>
     <Button x:Name='Add' Style='{StaticResource DarkButton}' Margin='0,10,0,0' Padding='10,9'
             HorizontalContentAlignment='Center'>
-      <TextBlock Text='+ Add account' FontSize='13'/>
+      <TextBlock x:Name='AddLabel' Text='+ Add account' FontSize='13'/>
     </Button>
-    <TextBlock Foreground='#52525B' FontSize='11' Margin='2,10,2,0' TextWrapping='Wrap'
+    <TextBlock x:Name='Footer' Foreground='#52525B' FontSize='11' Margin='2,10,2,0' TextWrapping='Wrap'
                Text='Numbers are what each Claude window last saved. Reset times are exact when Claude Code cached them, otherwise estimated from those samples. Click a card to open that account.'/>
   </StackPanel>
   </ScrollViewer>
@@ -860,6 +947,11 @@ namespace ClaudeAccounts
         public UsageWindow()
         {
             Window = (Window)XamlReader.Parse(Layout);
+            Window.Title = L.T("Claude accounts", "Claude акаунти");
+            ((TextBlock)Window.FindName("AddLabel")).Text = L.T("+ Add account", "+ Додати акаунт");
+            ((TextBlock)Window.FindName("Footer")).Text = L.T(
+                "Numbers are what each Claude window last saved. Reset times are exact when Claude Code cached them, otherwise estimated from those samples. Click a card to open that account.",
+                "Цифри — це те, що кожне вікно Claude зберегло останнім. Час скидання точний, якщо його закешував Claude Code; інакше він оцінений за цими семплами. Натисніть картку, щоб відкрити акаунт.");
             list = (ItemsControl)Window.FindName("List");
             Window.Icon = Imaging.CreateBitmapSourceFromHIcon(
                 Paths.Icon().Handle, Int32Rect.Empty, System.Windows.Media.Imaging.BitmapSizeOptions.FromEmptyOptions());
@@ -883,12 +975,16 @@ namespace ClaudeAccounts
                 var row = RowAt(e.OriginalSource);
                 if (row == null) { e.Handled = true; return; }
                 var menu = new ContextMenu();
-                var open = new MenuItem { Header = "Open" };
+                var open = new MenuItem { Header = L.T("Open", "Відкрити") };
                 open.Click += delegate { Accounts.Open(row.Name); };
                 menu.Items.Add(open);
+                menu.Items.Add(new Separator());
+                var reset = new MenuItem { Header = L.T("Set weekly reset...", "Задати тижневе скидання…") };
+                reset.Click += delegate { EditWeeklyReset(row); };
+                menu.Items.Add(reset);
                 if (row.Name != null)
                 {
-                    var remove = new MenuItem { Header = "Remove account..." };
+                    var remove = new MenuItem { Header = L.T("Remove account...", "Видалити акаунт…") };
                     remove.Click += delegate { RemoveAccount(row); };
                     menu.Items.Add(new Separator());
                     menu.Items.Add(remove);
@@ -909,7 +1005,7 @@ namespace ClaudeAccounts
                 }
                 catch (Exception ex)
                 {
-                    MessageBox.Show(Window, ex.Message, "Claude accounts", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    MessageBox.Show(Window, ex.Message, L.T("Claude accounts", "Claude акаунти"), MessageBoxButton.OK, MessageBoxImage.Warning);
                 }
             };
             var timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(20) };
@@ -941,9 +1037,9 @@ namespace ClaudeAccounts
         void RemoveAccount(AccountRow row)
         {
             var answer = MessageBox.Show(Window,
-                "Delete the '" + row.Name + "' window, its saved sign-in and local data?\n\n" +
-                "Its folder, device id and Claude Code credentials are deleted. Code history in ~\\.claude is kept.",
-                "Claude accounts", MessageBoxButton.YesNo, MessageBoxImage.Warning);
+                L.T("Delete the '", "Видалити вікно '") + row.Name + L.T("' window, its saved sign-in and local data?\n\nIts folder, device id and Claude Code credentials are deleted. Code history in ~\\.claude is kept.",
+                    "' , збережений вхід і локальні дані?\n\nКаталог, device id і облікові дані Claude Code буде видалено. Історія Code у ~\\.claude залишиться."),
+                L.T("Claude accounts", "Claude акаунти"), MessageBoxButton.YesNo, MessageBoxImage.Warning);
             if (answer != MessageBoxResult.Yes) return;
             try
             {
@@ -952,7 +1048,22 @@ namespace ClaudeAccounts
             }
             catch (Exception ex)
             {
-                MessageBox.Show(Window, ex.Message, "Claude accounts", MessageBoxButton.OK, MessageBoxImage.Warning);
+                MessageBox.Show(Window, ex.Message, L.T("Claude accounts", "Claude акаунти"), MessageBoxButton.OK, MessageBoxImage.Warning);
+            }
+        }
+
+        void EditWeeklyReset(AccountRow row)
+        {
+            var result = ResetDialog.Show(Window, Accounts.WeeklyReset(row.Name));
+            if (!result.Changed) return;
+            try
+            {
+                Accounts.SetWeeklyReset(row.Name, result.Value);
+                Refresh();
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(Window, ex.Message, L.T("Claude accounts", "Claude акаунти"), MessageBoxButton.OK, MessageBoxImage.Warning);
             }
         }
 
@@ -989,7 +1100,7 @@ namespace ClaudeAccounts
         Background='#0B0B0C' FontFamily='Segoe UI Variable Text, Segoe UI' FontSize='13'>
   <Window.Resources>" + Theme.DialogResources + @"</Window.Resources>
   <StackPanel Margin='16'>
-    <TextBlock Text='Name for the new account window' Foreground='#A1A1AA'/>
+    <TextBlock x:Name='Caption' Text='Name for the new account window' Foreground='#A1A1AA'/>
     <TextBox x:Name='Name' Margin='0,8,0,0' Padding='8,6' Background='#131315' Foreground='#F4F4F5'
              BorderBrush='#2A2A2F' CaretBrush='#F4F4F5'/>
     <TextBlock x:Name='Hint' Foreground='#F87171' FontSize='11.5' Margin='0,6,0,0'
@@ -1004,6 +1115,10 @@ namespace ClaudeAccounts
         public static string Show(Window owner)
         {
             var window = (Window)XamlReader.Parse(Layout);
+            window.Title = L.T("Add account", "Додати акаунт");
+            ((TextBlock)window.FindName("Caption")).Text = L.T("Name for the new account window", "Назва нового вікна акаунта");
+            ((Button)window.FindName("Cancel")).Content = L.T("Cancel", "Скасувати");
+            ((Button)window.FindName("Ok")).Content = L.T("Add", "Додати");
             window.Owner = owner;
             var name = (TextBox)window.FindName("Name");
             var hint = (TextBlock)window.FindName("Hint");
@@ -1023,6 +1138,78 @@ namespace ClaudeAccounts
             };
             name.Focus();
             return window.ShowDialog() == true ? result : null;
+        }
+    }
+
+
+    class ResetDialog
+    {
+        public class Result
+        {
+            public bool Changed;
+            public DateTime? Value;
+        }
+
+        const string Layout = @"
+<Window xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation'
+        xmlns:x='http://schemas.microsoft.com/winfx/2006/xaml'
+        Title='Set weekly reset' Width='400' SizeToContent='Height' ResizeMode='NoResize'
+        WindowStartupLocation='CenterOwner' ShowInTaskbar='False'
+        Background='#0B0B0C' FontFamily='Segoe UI Variable Text, Segoe UI' FontSize='13'>
+  <Window.Resources>" + Theme.DialogResources + @"</Window.Resources>
+  <StackPanel Margin='16'>
+    <TextBlock x:Name='Caption' Text='Weekly reset from Settings &gt; Usage' Foreground='#A1A1AA' TextWrapping='Wrap'/>
+    <TextBox x:Name='When' Margin='0,8,0,0' Padding='8,6' Background='#131315' Foreground='#F4F4F5'
+             BorderBrush='#2A2A2F' CaretBrush='#F4F4F5'/>
+    <TextBlock x:Name='Format' Text='YYYY-MM-DD HH:MM' Foreground='#52525B' FontSize='11.5' Margin='0,5,0,0'/>
+    <TextBlock x:Name='Hint' Foreground='#F87171' FontSize='11.5' Margin='0,5,0,0'
+               TextWrapping='Wrap' Visibility='Collapsed'/>
+    <StackPanel Orientation='Horizontal' HorizontalAlignment='Right' Margin='0,14,0,0'>
+      <Button x:Name='Clear' Content='Clear' Style='{StaticResource DarkButton}' Padding='14,6' Margin='0,0,8,0'/>
+      <Button x:Name='Cancel' Content='Cancel' Style='{StaticResource DarkButton}' Padding='14,6' Margin='0,0,8,0' IsCancel='True'/>
+      <Button x:Name='Ok' Content='Save' Style='{StaticResource PrimaryButton}' Padding='14,6' IsDefault='True'/>
+    </StackPanel>
+  </StackPanel>
+</Window>";
+
+        public static Result Show(Window owner, DateTime? current)
+        {
+            var window = (Window)XamlReader.Parse(Layout);
+            window.Title = L.T("Set weekly reset", "Задати тижневе скидання");
+            ((TextBlock)window.FindName("Caption")).Text = L.T("Weekly reset from Settings > Usage", "Тижневе скидання з Settings > Usage");
+            ((TextBlock)window.FindName("Format")).Text = L.T("YYYY-MM-DD HH:MM", "РРРР-ММ-ДД ГГ:ХХ");
+            ((Button)window.FindName("Clear")).Content = L.T("Clear", "Очистити");
+            ((Button)window.FindName("Cancel")).Content = L.T("Cancel", "Скасувати");
+            ((Button)window.FindName("Ok")).Content = L.T("Save", "Зберегти");
+            window.Owner = owner;
+            var box = (TextBox)window.FindName("When");
+            var hint = (TextBlock)window.FindName("Hint");
+            if (current.HasValue) box.Text = current.Value.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture);
+            var result = new Result();
+            ((Button)window.FindName("Clear")).Click += delegate
+            {
+                result.Changed = true;
+                result.Value = null;
+                window.DialogResult = true;
+            };
+            ((Button)window.FindName("Ok")).Click += delegate
+            {
+                DateTime value;
+                var text = box.Text.Trim();
+                if (!DateTime.TryParse(text, L.Culture, DateTimeStyles.AssumeLocal, out value)
+                    && !DateTime.TryParse(text, CultureInfo.InvariantCulture, DateTimeStyles.AssumeLocal, out value))
+                {
+                    hint.Text = L.T("Use YYYY-MM-DD HH:MM, for example 2026-10-30 12:00.",
+                                    "Введіть у форматі РРРР-ММ-ДД ГГ:ХХ, наприклад 2026-10-30 12:00.");
+                    hint.Visibility = Visibility.Visible;
+                    return;
+                }
+                result.Changed = true;
+                result.Value = value;
+                window.DialogResult = true;
+            };
+            box.Focus();
+            return window.ShowDialog() == true ? result : new Result();
         }
     }
 
@@ -1069,11 +1256,11 @@ namespace ClaudeAccounts
                 Forms.Application.EnableVisualStyles();
                 Forms.Application.SetCompatibleTextRenderingDefault(false);
 
-                var tray = new Forms.NotifyIcon { Icon = Paths.Icon(), Text = "Claude accounts", Visible = true };
+                var tray = new Forms.NotifyIcon { Icon = Paths.Icon(), Text = L.T("Claude accounts", "Claude акаунти"), Visible = true };
                 var menu = new Forms.ContextMenuStrip();
-                menu.Items.Add("Add account...", null, delegate { AddAccountFromTray(); });
-                menu.Items.Add("Show usage", null, delegate { ShowUsage(); });
-                menu.Items.Add("Quit", null, delegate
+                menu.Items.Add(L.T("Add account...", "Додати акаунт…"), null, delegate { AddAccountFromTray(); });
+                menu.Items.Add(L.T("Show usage", "Показати ліміти"), null, delegate { ShowUsage(); });
+                menu.Items.Add(L.T("Quit", "Вихід"), null, delegate
                 {
                     tray.Visible = false;
                     CloseUsage();
@@ -1119,7 +1306,7 @@ namespace ClaudeAccounts
                 }
                 catch (Exception ex)
                 {
-                    Forms.MessageBox.Show(ex.Message, "Add account", Forms.MessageBoxButtons.OK, Forms.MessageBoxIcon.Warning);
+                    Forms.MessageBox.Show(ex.Message, L.T("Add account", "Додати акаунт"), Forms.MessageBoxButtons.OK, Forms.MessageBoxIcon.Warning);
                 }
             }
         }
@@ -1128,7 +1315,7 @@ namespace ClaudeAccounts
         {
             using (var form = new Forms.Form
             {
-                Text = "Add account",
+                Text = L.T("Add account", "Додати акаунт"),
                 ClientSize = new System.Drawing.Size(360, 118),
                 FormBorderStyle = Forms.FormBorderStyle.FixedDialog,
                 StartPosition = Forms.FormStartPosition.CenterScreen,
@@ -1137,10 +1324,10 @@ namespace ClaudeAccounts
                 ShowInTaskbar = false
             })
             {
-                var label = new Forms.Label { Text = "Name for the new account window:", Left = 12, Top = 12, Width = 330 };
+                var label = new Forms.Label { Text = L.T("Name for the new account window:", "Назва нового вікна акаунта:"), Left = 12, Top = 12, Width = 330 };
                 var box = new Forms.TextBox { Left = 12, Top = 36, Width = 330 };
-                var ok = new Forms.Button { Text = "Add", DialogResult = Forms.DialogResult.OK, Left = 250, Top = 76, Width = 80 };
-                var cancel = new Forms.Button { Text = "Cancel", DialogResult = Forms.DialogResult.Cancel, Left = 160, Top = 76, Width = 80 };
+                var ok = new Forms.Button { Text = L.T("Add", "Додати"), DialogResult = Forms.DialogResult.OK, Left = 250, Top = 76, Width = 80 };
+                var cancel = new Forms.Button { Text = L.T("Cancel", "Скасувати"), DialogResult = Forms.DialogResult.Cancel, Left = 160, Top = 76, Width = 80 };
                 form.Controls.Add(label);
                 form.Controls.Add(box);
                 form.Controls.Add(ok);

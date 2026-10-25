@@ -49,7 +49,7 @@ cd claude-desktop-multi-account
 
    Or use **+ Add account** at the bottom of the `Claude accounts` usage window, or right-click the tray icon and choose **Add account...**. Both ask for a name and open the new window for sign-in.
 
-2. Open `Claude work` from the Start menu (right-click a card in the usage window to remove an account later).
+2. Open `Claude work` from the Start menu (right-click a card in the usage window to remove an account later). If the weekly reset date is shown as `(estimated)`, right-click the card and choose **Set weekly reset...**: paste the exact time from Claude's **Settings > Usage** once; it is stored in the account folder and used until it passes.
 3. Sign in with **Continue with email**, then type the verification code from the email link into that window. See the note on Google below.
 4. Right-click its taskbar icon and choose **Pin to taskbar**. After a restart, click the pinned icons; every window is still signed in.
 5. Open `Claude accounts` from the Start menu for the usage window. You can pin that too.
@@ -89,6 +89,7 @@ Local changes on top of upstream, so two accounts do not share identity files:
 - `ccm telemetry <name> off` adds `--desktop-managed-config={"disableEssentialTelemetry":true}`
   to that window, which stops the crash/report telemetry that carries CPU, RAM, screen
   and machine manufacturer/model.
+- The usage window, tray menu, dialogs and messages follow the Windows UI language (English fallback).
 - What remains shared and cannot be changed from the client: the public IP, the OS
   hostname and hardware, the `anthropic-client-*` headers (RAM class, OS, app version),
   and anything tied to payments or email addresses. See `ISOLATION.md` for measurements.
